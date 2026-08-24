@@ -1,0 +1,2 @@
+remappable-file-gateway==1.0.0
+-r backend/requirements.txt

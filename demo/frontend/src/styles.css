@@ -1,0 +1,117 @@
+/* Application layout: header + workspace + statusbar.
+   Shared primitives (buttons, tags, table, modals) come from ui.css. */
+
+.app { height: 100vh; height: 100dvh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+/* -- header --------------------------------------------------------------- */
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.header-side { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.app > .action-result { margin: 10px 24px 0; flex: 0 0 auto; }
+
+/* -- main layout -------------------------------------------------------------- */
+.app-main {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+   grid-template-columns: minmax(0, 1fr) 330px;
+   grid-template-rows: minmax(0, 1fr);
+  gap: 14px;
+  padding: 14px 24px;
+   align-items: stretch;
+   overflow: hidden;
+}
+@media (max-width: 1080px) {
+  .app-main { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 3fr) minmax(140px, 1fr); }
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+/* -- workspace ------------------------------------------------------------------- */
+.workspace { display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; overflow: hidden; }
+.workspace-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.filter-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.tab:hover { background: var(--surface-sunken); }
+.tab.active { background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent); font-weight: 600; }
+.tab-count { font-family: var(--mono); font-size: 11px; font-weight: 700; }
+.workspace-search { flex: 1; min-width: 180px; font-family: var(--mono); font-size: 12px; }
+.workspace-state { display: flex; align-items: center; gap: 10px; }
+
+.workspace-actions { display: flex; align-items: stretch; gap: 10px; flex-wrap: wrap; }
+.action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-sunken);
+}
+.action-group .btn { padding: 5px 9px; font-size: 12px; }
+.algo-picker { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.algo-picker .check { font-size: 11px; gap: 4px; }
+
+.workspace .join-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.workspace .join-table { min-width: 1080px; }
+.workspace .join-table .col-local { min-width: 230px; }
+.workspace .join-table .col-virtual { min-width: 250px; }
+.workspace .join-table .col-name { min-width: 180px; }
+
+.api-log-panel { min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.api-log-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.api-log-heading h2 { margin: 0; font-size: 14px; }
+.api-log-heading p { margin: 3px 0 0; font-size: 11px; }
+.api-log-heading .btn { padding: 4px 8px; font-size: 11px; }
+.api-log-list { list-style: none; margin: 0; padding: 8px 2px 0 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.api-log-entry { border-left: 3px solid var(--border-strong); padding: 6px 8px; background: var(--surface-sunken); font-size: 11px; overflow-wrap: anywhere; }
+.api-log-entry.success { border-left-color: var(--accent); }
+.api-log-entry.pending { border-left-color: var(--info-text); }
+.api-log-entry.hash-failed, .api-log-entry.http-error, .api-log-entry.network-error { border-left-color: var(--bad-text); background: var(--bad-bg); }
+.api-log-entry.cancelled { border-left-color: var(--text-muted); }
+.api-log-meta, .api-log-result { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; color: var(--text-muted); }
+.api-log-meta code { font-family: var(--mono); font-size: 10px; }
+.api-log-request { margin: 4px 0; font-family: var(--mono); color: var(--text); }
+.api-log-result span:last-child { margin-left: auto; white-space: nowrap; }
+.api-log-empty { color: var(--text-muted); font-size: 12px; padding: 8px; }
+
+/* -- statusbar --------------------------------------------------------------------- */
+.statusbar {
+  padding: 9px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+}

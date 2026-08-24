@@ -1,0 +1,210 @@
+name: Release Verification And PyPI Publishing
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build --wheel
+      - name: Check wheel contents and test core
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          wheels = list(Path("dist").glob("*.whl"))
+          assert len(wheels) == 1, wheels
+          with ZipFile(wheels[0]) as wheel:
+              names = set(wheel.namelist())
+          assert "rfg/openapi.yaml" in names
+          assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names)
+          assert not [name for name in names if name.startswith(("demo/", "tests/", "data/"))]
+          PY
+          python -m venv .ci-venv
+          wheel="$(realpath dist/*.whl)"
+          .ci-venv/bin/python -m pip install "${wheel}[dev]"
+          .ci-venv/bin/python -m pytest -q -o pythonpath= tests
+  demo-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build --wheel
+      - run: |
+          python -m venv .ci-venv
+          wheel="$(realpath dist/*.whl)"
+          .ci-venv/bin/python -m pip install "$wheel" -r demo/backend/requirements.txt -r demo/requirements-test.txt
+          .ci-venv/bin/python -m pytest -q -o pythonpath= demo/tests
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demo/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm run build
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build --wheel
+      - name: Build bridge image against local wheel
+        run: |
+          wheel="$(realpath dist/*.whl)"
+          sh demo/wheel-demo-bridge/build-local-wheel-image.sh "$wheel" rfg-demo-ci
+          sh demo/wheel-demo-bridge/smoke-image.sh rfg-demo-ci
+  windows:
+    runs-on: windows-latest
+    env:
+      RFG_SKIP_PAUSE: "1"
+      RFG_PYTHON: "python"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build --wheel
+      - name: Set up demo environment from local wheel
+        shell: cmd
+        working-directory: demo
+        run: for %%F in (..\dist\*.whl) do call wheel-demo-bridge\install-local-wheel.bat "%%~fF"
+      - name: Test demo host against installed wheel
+        shell: cmd
+        working-directory: demo
+        run: .venv\Scripts\python.exe -m pip install -r requirements-test.txt && .venv\Scripts\python.exe -m pytest -q -o pythonpath= tests
+  build-distribution:
+    needs: [core, demo-backend, frontend, docker, windows]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --upgrade pip build
+      - name: Validate release tag, build, and inspect wheel
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import tomllib
+
+          metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          version = metadata["project"]["version"]
+          demo_requirement = Path("demo/requirements.txt").read_text(encoding="utf-8").splitlines()[0]
+          assert demo_requirement == f"remappable-file-gateway=={version}", (
+              "demo/requirements.txt must pin the release version"
+          )
+          documentation = {
+              "README.md": f"remappable-file-gateway=={version}",
+              "demo/README.md": f"remappable-file-gateway=={version}",
+          }
+          for filename, expected in documentation.items():
+              assert expected in Path(filename).read_text(encoding="utf-8"), (
+                  f"{filename} must reference release version {version}"
+              )
+          version_namespace: dict[str, str] = {}
+          exec(Path("src/rfg/__init__.py").read_text(encoding="utf-8"), version_namespace)
+          assert version_namespace["__version__"] == version, (
+              "src/rfg/__init__.py __version__ must match pyproject.toml"
+          )
+          tag = os.environ["RELEASE_TAG"]
+          assert tag == f"v{version}", (
+              f"Release tag {tag!r} must exactly match v{version}"
+          )
+          PY
+          python -m build --wheel
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          assert len(wheels) == 1, wheels
+          with ZipFile(wheels[0]) as wheel:
+              names = set(wheel.namelist())
+          assert "rfg/openapi.yaml" in names
+          assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names)
+          assert not [
+              name for name in names
+              if name.startswith(("demo/", "tests/", "data/"))
+          ]
+          PY
+          python -m venv .release-venv
+          wheel="$(realpath dist/*.whl)"
+          .release-venv/bin/python -m pip install "$wheel" -r demo/backend/requirements.txt -r demo/requirements-test.txt
+          .release-venv/bin/python -m pytest -q -o pythonpath= tests demo/tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/*.whl
+  attach-release-wheel:
+    needs: build-distribution
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist
+      - name: Attach validated wheel to GitHub Release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/*.whl --clobber
+  publish-to-pypi:
+    needs: attach-release-wheel
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/remappable-file-gateway/
+    concurrency:
+      group: pypi-publish-${{ github.event.release.tag_name }}
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist
+      # release/v1 as of 2026-08-22
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33

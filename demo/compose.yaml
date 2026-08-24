@@ -1,0 +1,11 @@
+services:
+  rfg-demo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ${RFG_RESOURCE_HOST_PATH:-./data/res}:/resource:ro
+      - ${RFG_DATA_HOST_PATH:-./data/data}:/rfg-data
+    restart: unless-stopped

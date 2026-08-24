@@ -1,0 +1,360 @@
+openapi: 3.1.0
+info:
+  title: RemappableFileGateway API
+  version: 1.0.0
+  description: |
+    Public API v1 for a remappable local-file gateway. The canonical schema is
+    complemented by `docs/api/contract.md`, which defines operational limits.
+servers:
+  # Relative to the OpenAPI document, so a mounted /rfg/openapi.json uses /rfg/.
+  - url: ./
+tags:
+  - name: Health
+  - name: Metadata
+  - name: Hashes
+  - name: Resources
+paths:
+  /api/v1/health:
+    get:
+      tags: [Health]
+      summary: Check runtime availability
+      responses:
+        '200':
+          description: Runtime is available.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Health'}
+              examples:
+                ok: {value: {status: ok, product: RemappableFileGateway}}
+  /api/v1/meta/local:
+    get:
+      tags: [Metadata]
+      summary: Scan and return the current local catalog
+      description: |
+        Requires the deployment-defined `meta:read` scope. No authorization
+        header or wire protocol is standardized by this API. This request creates
+        the catalog snapshot used by subsequent hashes and resource requests.
+        A file whose name ends in `.rfg.zip` (case-insensitive) is a designated
+        archive: safe members are emitted as `archive.rfg.zip!/member` and the
+        container is not emitted. Every other file, including an ordinary `.zip`,
+        is one opaque ordinary-file entry and is never inspected or expanded.
+        `size_bytes` is the ordinary file size or the uncompressed `.rfg.zip`
+        member size.
+      responses:
+        "200":
+          description: Current safe catalog entries, ordered by logical path.
+          content: {application/json: {schema: {$ref: '#/components/schemas/LocalCatalog'}}}
+        "403": {$ref: '#/components/responses/Forbidden'}
+  /api/v1/meta/map:
+    get:
+      tags: [Metadata]
+      summary: Get the mapping document
+      description: |
+        Requires the deployment-defined `meta:read` scope. The returned ETag is
+        a quoted SHA-256 of the canonical mapping JSON and can be used with PUT.
+      responses:
+        '200':
+          description: Current mapping document.
+          headers:
+            ETag: {$ref: '#/components/headers/MappingETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MappingDocument'}
+              examples:
+                empty: {value: {entries: []}}
+                mapped:
+                  value:
+                    entries:
+                      - virtual_path: manuals/readme.pdf
+                        local_path: incoming.rfg.zip!/docs/readme.pdf
+                        size_bytes: 28421
+                        crc32: a1b2c3d4
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503':
+          description: The persisted mapping file cannot be parsed or validated.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DetailError'}
+              example: {detail: mapping file is invalid}
+    put:
+      tags: [Metadata]
+      summary: Atomically replace the mapping document
+      description: |
+        Requires the deployment-defined `meta:write` scope. `If-Match` is optional:
+        omit it for last-write-wins, or send the exact ETag from GET for optimistic
+        concurrency. A corrupt existing mapping is recoverable by a valid PUT even
+        when `If-Match` is supplied.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MappingDocument'}
+      responses:
+        '200':
+          description: Validated, normalized document written atomically. PUT does not return an ETag.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MappingDocument'}
+        "400":
+          description: Invalid JSON or mapping validation/persistence failure.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DetailError'}
+        "403": {$ref: '#/components/responses/Forbidden'}
+        "412":
+          description: If-Match did not exactly equal the current ETag.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DetailError'}
+              example: {detail: precondition failed}
+  /api/v1/hashes:
+    post:
+      tags: [Hashes]
+      summary: Compute one hash from the current catalog snapshot
+      description: |
+        Requires the deployment-defined `hashes:compute` scope. The JSON object
+        must contain exactly `local_path` and `algorithm`; extra or missing fields
+        are rejected. Accepted work always returns a terminal 200 body: `succeeded`
+        or `failed`. A 429 means work was not accepted; retry after `Retry-After`.
+        CRC32 for a catalogued `.rfg.zip` member is reused from validated ZIP
+        metadata (`code: reused`). CRC32 for every ordinary entry, including an
+        ordinary `.zip`, is computed over that entry's raw bytes (`code: computed`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/HashRequest'}
+            example: {local_path: incoming.rfg.zip!/docs/readme.pdf, algorithm: sha256}
+      responses:
+        "200":
+          description: Terminal hash result, including structured failure information when applicable.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HashTerminalResult'}
+              examples:
+                succeeded:
+                  value: {local_path: report.pdf, algorithm: sha256, profile: null, status: succeeded, value: '6a4f...', code: computed, detail: null, error: null}
+                failed:
+                  value: {local_path: image.png, algorithm: phash, profile: imagehash-8-v1, status: failed, value: null, code: unsupported_image, detail: source is not a supported image, error: {code: unsupported_image, message: source is not a supported image, retryable: false}}
+                image_too_large:
+                  value: {local_path: image.png, algorithm: phash, profile: imagehash-8-v1, status: failed, value: null, code: image_too_large, detail: image exceeds the fixed pixel limit, error: {code: image_too_large, message: image exceeds the fixed pixel limit, retryable: false}}
+        "400": {$ref: '#/components/responses/DetailBadRequest'}
+        "403": {$ref: '#/components/responses/Forbidden'}
+        "404":
+          description: local_path is absent from the current catalog snapshot.
+          content: {application/json: {schema: {$ref: '#/components/schemas/DetailError'}}}
+        "429":
+          description: Hash capacity is fully occupied; no hash was started.
+          headers: {Retry-After: {$ref: '#/components/headers/RetryAfter'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CapacityError'}
+              example: {detail: hash capacity is unavailable, code: capacity_exceeded}
+  /res/{virtual_path}:
+    parameters:
+      - $ref: '#/components/parameters/VirtualPath'
+    get:
+      tags: [Resources]
+      summary: Deliver a mapped binary resource
+      description: |
+        Requires the deployment-defined `resource:read` scope. Only one byte range
+        is supported. Resource error bodies are deliberately not a universal API
+        error envelope: some statuses have an empty body and a mapping-read failure
+        has `{"error":{"code":"content_unavailable"}}`.
+      parameters:
+        - $ref: '#/components/parameters/Range'
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses: &resourceResponses
+        "200": {$ref: '#/components/responses/ResourceFull'}
+        "206": {$ref: '#/components/responses/ResourcePartial'}
+        "304": {$ref: '#/components/responses/ResourceNotModified'}
+        "403": {$ref: '#/components/responses/Forbidden'}
+        "404": {description: No mapping entry exists for this virtual path; body is empty.}
+        "416": {$ref: '#/components/responses/RangeNotSatisfiable'}
+        "503": {$ref: '#/components/responses/ResourceUnavailable'}
+    head:
+      tags: [Resources]
+      summary: Get mapped resource headers without a body
+      description: Requires the deployment-defined `resource:read` scope. Range and conditional semantics match GET.
+      parameters:
+        - $ref: '#/components/parameters/Range'
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        "200": {$ref: '#/components/responses/ResourceHeadFull'}
+        "206": {$ref: '#/components/responses/ResourceHeadPartial'}
+        "304": {$ref: '#/components/responses/ResourceNotModified'}
+        "403": {$ref: '#/components/responses/Forbidden'}
+        "404": {description: No mapping entry exists for this virtual path; body is empty.}
+        "416": {$ref: '#/components/responses/RangeNotSatisfiable'}
+        "503": {$ref: '#/components/responses/ResourceUnavailable'}
+components:
+  parameters:
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      schema: {type: string}
+      description: Exact quoted ETag returned by GET /api/v1/meta/map; wildcard and list syntax are not supported.
+    VirtualPath:
+      name: virtual_path
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/SafePath'}
+      description: Mapped safe POSIX-relative virtual path.
+    Range:
+      name: Range
+      in: header
+      required: false
+      schema: {type: string, example: bytes=0-1023}
+      description: One bytes=start-end, bytes=start-, or bytes=-suffix range. Multiple ranges are rejected with 416.
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      schema: {type: string}
+      description: Exact resource ETag to validate; list and wildcard syntax are not interpreted.
+  headers:
+    MappingETag:
+      description: Quoted SHA-256 ETag over canonical mapping JSON.
+      schema: {type: string, pattern: '^"[0-9a-f]{64}"$'}
+    ResourceETag: {description: Quoted ETag for this mapped source snapshot., schema: {type: string}}
+    RetryAfter: {description: Seconds before retrying an unaccepted hash request., schema: {type: string, example: '1'}}
+    ContentRange: {description: Selected byte interval (206) or total length (416)., schema: {type: string}}
+    ContentLength: {description: Decimal number of bytes in the selected representation., schema: {type: string, pattern: '^[0-9]+$'}}
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status, product]
+      properties: {status: {type: string, const: ok}, product: {type: string, const: RemappableFileGateway}}
+    SafePath:
+      type: string
+      minLength: 1
+      description: POSIX-relative path with no backslash, NUL, empty, dot or dot-dot segment, and no leading slash.
+      pattern: '^(?!/)(?!.*\\)(?!.*\x00)(?!.*(^|/)\.{1,2}(/|$))[^/]+(?:/[^/]+)*$'
+    LogicalLocalPath:
+      allOf: [{$ref: '#/components/schemas/SafePath'}]
+      description: A catalog path. Only a case-insensitive .rfg.zip suffix designates an archive; its safe members use archive.rfg.zip!/member and its container is not catalogued. An ordinary .zip has no !/ member paths and is catalogued as one opaque file.
+    LocalCatalog:
+      type: object
+      additionalProperties: false
+      required: [local_files]
+      description: Ordered safe catalog records. The .rfg.zip suffix is a catalog behavior switch, not a generic ZIP-content detector.
+      properties:
+        local_files:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [local_path, size_bytes]
+            properties: {local_path: {$ref: '#/components/schemas/LogicalLocalPath'}, size_bytes: {type: integer, minimum: 0}}
+    MappingDocument:
+      type: object
+      additionalProperties: false
+      required: [entries]
+      properties: {entries: {type: array, items: {$ref: '#/components/schemas/MappingEntry'}}}
+      description: Each virtual_path and each local_path must be unique across entries.
+    MappingEntry:
+      type: object
+      additionalProperties: false
+      required: [virtual_path, local_path]
+      properties:
+        virtual_path: {$ref: '#/components/schemas/SafePath'}
+        local_path: {$ref: '#/components/schemas/LogicalLocalPath'}
+        size_bytes: {type: [integer, 'null'], minimum: 0}
+        crc32: {$ref: '#/components/schemas/OptionalNonEmptyString'}
+        md5: {$ref: '#/components/schemas/OptionalNonEmptyString'}
+        sha256: {$ref: '#/components/schemas/OptionalNonEmptyString'}
+        ahash: {$ref: '#/components/schemas/OptionalNonEmptyString'}
+        dhash: {$ref: '#/components/schemas/OptionalNonEmptyString'}
+        phash: {$ref: '#/components/schemas/OptionalNonEmptyString'}
+    OptionalNonEmptyString: {type: [string, 'null'], minLength: 1}
+    HashRequest:
+      type: object
+      additionalProperties: false
+      required: [local_path, algorithm]
+      properties: {local_path: {$ref: '#/components/schemas/LogicalLocalPath'}, algorithm: {type: string, enum: [crc32, md5, sha256, ahash, dhash, phash]}}
+    HashTerminalResult:
+      oneOf:
+        - $ref: '#/components/schemas/HashSucceeded'
+        - $ref: '#/components/schemas/HashFailed'
+    HashSucceeded:
+      type: object
+      additionalProperties: false
+      required: [local_path, algorithm, profile, status, value, code, detail, error]
+      properties:
+        local_path: {$ref: '#/components/schemas/LogicalLocalPath'}
+        algorithm: {type: string, enum: [crc32, md5, sha256, ahash, dhash, phash]}
+        profile: {type: [string, 'null'], description: imagehash-8-v1 for ahash, dhash, and phash; null otherwise.}
+        status: {type: string, const: succeeded}
+        value: {type: string}
+        code: {type: string, enum: [computed, reused]}
+        detail: {type: 'null'}
+        error: {type: 'null'}
+    HashFailed:
+      type: object
+      additionalProperties: false
+      required: [local_path, algorithm, profile, status, value, code, detail, error]
+      properties:
+        local_path: {$ref: '#/components/schemas/LogicalLocalPath'}
+        algorithm: {type: string, enum: [crc32, md5, sha256, ahash, dhash, phash]}
+        profile: {type: [string, 'null'], description: imagehash-8-v1 for ahash, dhash, and phash; null otherwise.}
+        status: {type: string, const: failed}
+        value: {type: 'null'}
+        code: {type: string, enum: [source_stale, changed_during_hash, unsupported_image, image_too_large, hash_failed]}
+        detail: {type: string}
+        error: {$ref: '#/components/schemas/HashFailureError'}
+    HashFailureError:
+      type: object
+      additionalProperties: false
+      required: [code, message, retryable]
+      properties: {code: {type: string, enum: [source_stale, changed_during_hash, unsupported_image, image_too_large, hash_failed]}, message: {type: string}, retryable: {type: boolean}}
+    DetailError:
+      type: object
+      additionalProperties: false
+      required: [detail]
+      properties: {detail: {type: string}}
+    CapacityError:
+      type: object
+      additionalProperties: false
+      required: [detail, code]
+      properties: {detail: {type: string, const: hash capacity is unavailable}, code: {type: string, const: capacity_exceeded}}
+  responses:
+    Forbidden:
+      description: Deployment authorization denied the required scope.
+      content: {application/json: {schema: {$ref: '#/components/schemas/DetailError'}, example: {detail: forbidden}}}
+    DetailBadRequest:
+      description: Invalid request body or request field.
+      content: {application/json: {schema: {$ref: '#/components/schemas/DetailError'}}}
+    ResourceFull:
+      description: Complete binary resource.
+      headers: {Accept-Ranges: {schema: {type: string, const: bytes}}, ETag: {$ref: '#/components/headers/ResourceETag'}, Content-Length: {$ref: '#/components/headers/ContentLength'}, Cache-Control: {schema: {type: string, const: no-cache}}, X-Content-Type-Options: {schema: {type: string, const: nosniff}}}
+      content: {'*/*': {schema: {type: string, format: binary}}}
+    ResourcePartial:
+      description: Requested single byte range.
+      headers: {Accept-Ranges: {schema: {type: string, const: bytes}}, ETag: {$ref: '#/components/headers/ResourceETag'}, Content-Length: {$ref: '#/components/headers/ContentLength'}, Content-Range: {$ref: '#/components/headers/ContentRange'}, Cache-Control: {schema: {type: string, const: no-cache}}, X-Content-Type-Options: {schema: {type: string, const: nosniff}}}
+      content: {'*/*': {schema: {type: string, format: binary}}}
+    ResourceHeadFull:
+      description: Complete-resource headers; HEAD has no body.
+      headers: {Accept-Ranges: {schema: {type: string, const: bytes}}, ETag: {$ref: '#/components/headers/ResourceETag'}, Content-Length: {$ref: '#/components/headers/ContentLength'}, Cache-Control: {schema: {type: string, const: no-cache}}, X-Content-Type-Options: {schema: {type: string, const: nosniff}}}
+    ResourceHeadPartial:
+      description: Selected-range headers; HEAD has no body.
+      headers: {Accept-Ranges: {schema: {type: string, const: bytes}}, ETag: {$ref: '#/components/headers/ResourceETag'}, Content-Length: {$ref: '#/components/headers/ContentLength'}, Content-Range: {$ref: '#/components/headers/ContentRange'}, Cache-Control: {schema: {type: string, const: no-cache}}, X-Content-Type-Options: {schema: {type: string, const: nosniff}}}
+    ResourceNotModified:
+      description: Exact If-None-Match matched; no body.
+      headers: {Accept-Ranges: {schema: {type: string, const: bytes}}, ETag: {$ref: '#/components/headers/ResourceETag'}, Cache-Control: {schema: {type: string, const: no-cache}}, X-Content-Type-Options: {schema: {type: string, const: nosniff}}}
+    RangeNotSatisfiable:
+      description: Range syntax is invalid, multiple, or unsatisfiable; body is empty.
+      headers: {Content-Range: {$ref: '#/components/headers/ContentRange'}}
+    ResourceUnavailable:
+      description: An invalid mapping returns the documented JSON body. A source absent from the snapshot or a source preparation failure returns an empty 503 body.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [error]
+            properties: {error: {type: object, additionalProperties: false, required: [code], properties: {code: {type: string, const: content_unavailable}}}}
+          example: {error: {code: content_unavailable}}

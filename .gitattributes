@@ -1,0 +1,2 @@
+# Auto-detect text files and normalise line endings on commit.
+* text=auto
